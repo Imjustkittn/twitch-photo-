@@ -1,0 +1,20 @@
+* { box-sizing: border-box; }
+body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; background: #0e0e10; color: #eee; }
+.notice { padding: 14px; text-align: center; }
+.hidden { display: none; }
+.scroll { display: grid; grid-auto-flow: column; grid-auto-columns: 260px; gap: 12px; overflow-x: auto; padding: 14px; }
+.card { position: relative; border-radius: 12px; overflow: hidden; background: #18181b; }
+.card img { width: 100%; height: 320px; object-fit: cover; display: block; }
+.card .meta { padding: 8px 10px; display:flex; justify-content: space-between; align-items:center; }
+.badge { background: #9147ff; color:#fff; border-radius: 999px; padding: 2px 8px; font-size: 12px; }
+.bits { position:absolute; top:8px; right:8px; background: rgba(0,0,0,.6); padding:4px 8px; border-radius: 999px; font-size:12px; }
+.drawer { position: fixed; top: 0; right: 0; width: 380px; height: 100%; background: #0b0b0c; border-left: 1px solid #222; padding: 12px; overflow-y: auto; }
+#closeDrawer { position:absolute; top: 8px; right: 8px; background: #222; border:none; color:#fff; font-size: 18px; border-radius: 8px; padding: 6px 10px; cursor:pointer; }
+#drawerPhoto img { width:100%; border-radius: 10px; }
+#comments { margin-top: 12px; display: grid; gap: 8px; }
+.comment { background:#111; padding: 8px; border-radius:8px; }
+#commentBox { display:flex; gap: 8px; margin-top: 10px; }
+#commentText { flex:1; background:#111; color:#eee; border:1px solid #333; border-radius:8px; padding:8px; min-height:46px; }
+#commentBtn, .tip { background:#9147ff; border:none; color:#fff; padding:8px 12px; border-radius:8px; cursor:pointer; }
+.tip-row { display:flex; gap:8px; margin-top:10px; }
+#shareIdBtn { padding:10px 14px; background:#9147ff; border:none; color:#fff; border-radius:8px; cursor:pointer; }

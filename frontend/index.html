@@ -1,0 +1,39 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Subscriber Photo Gallery</title>
+    <link rel="stylesheet" href="styles.css"/>
+    <script src="https://extension-files.twitch.tv/helper/v1/twitch-ext.min.js"></script>
+  </head>
+  <body>
+    <div id="app">
+      <div id="gate" class="notice">Checking your sub status…</div>
+      <div id="identity" class="notice hidden">
+        <button id="shareIdBtn">Share identity to continue</button>
+      </div>
+      <div id="gallery" class="hidden">
+        <div id="photos" class="scroll"></div>
+        <div id="drawer" class="drawer hidden">
+          <button id="closeDrawer">×</button>
+          <div id="drawerPhoto"></div>
+          <div id="tipRow" class="tip-row">
+            <button data-sku="TIP_100" class="tip">Tip 100 Bits</button>
+            <button data-sku="TIP_500" class="tip">Tip 500 Bits</button>
+            <button data-sku="TIP_1000" class="tip">Tip 1000 Bits</button>
+          </div>
+          <div id="comments"></div>
+          <div id="commentBox">
+            <textarea id="commentText" maxlength="500" placeholder="Say something nice…"></textarea>
+            <button id="commentBtn">Post Comment (500 Bits)</button>
+          </div>
+          <div id="modTools" class="hidden">
+            <p>Broadcaster tools: click a comment to toggle hide/show.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+    <script src="panel.js"></script>
+  </body>
+</html>
