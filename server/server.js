@@ -87,15 +87,25 @@ app.get('/api/status', requireAuth, async (req, res) => {
   res.json({ userId, role, isSubscriber: sub });
 });
 
-// Photos (server also enforces sub-only on response)
 app.get('/api/photos', requireAuth, async (req, res) => {
   const { channel_id, twitch } = req;
-  const userId = twitch.user_id || null;
-  if (!userId) return res.status(403).json({ error: 'identity_required' });
-  const sub = await isSubscriber(channel_id, userId);
-  if (!sub) return res.status(403).json({ error: 'sub_only' });
-  const rows = db.prepare('SELECT id, url, title, tip_bits_total FROM photos WHERE channel_id=? ORDER BY id ASC').all(channel_id);
-  res.json(rows);
+  const role   = (twitch && twitch.role)    || 'viewer';
+  const userId = (twitch && twitch.user_id) || null;
+
+  // Only enforce identity for non-broadcaster/moderator
+  if (!userId && role !== 'broadcaster' && role !== 'moderator') {
+    return res.status(403).json({ error: 'identity_required' });
+  }
+  // Sub check only for regular viewers
+  if (role !== 'broadcaster' && role !== 'moderator') {
+    const sub = await isSubscriber(channel_id, userId);
+    if (!sub) return res.status(403).json({ error: 'sub_only' });
+  }
+
+  const rows = db.prepare(
+    'SELECT id, url, title, tip_bits_total FROM photos WHERE channel_id = ? ORDER BY id DESC'
+  ).all(channel_id);
+  res.json({ photos: rows });
 });
 
 app.get('/api/comments', requireAuth, (req, res) => {
