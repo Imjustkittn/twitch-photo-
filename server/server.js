@@ -152,7 +152,7 @@ app.patch('/api/comment/:id', requireAuth, (req, res) => {
 });
 
 // Bits transaction verification for tips only
-app.post('/api/transactions/complete', requireAuth, (req, res) => {
+app.post('/api/transactions/complete', requireAuth, async (req, res) => {
   try {
     const { channel_id } = req;
     const { receipt, photoId } = req.body;
