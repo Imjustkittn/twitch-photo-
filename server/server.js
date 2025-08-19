@@ -1,39 +1,39 @@
 // server/server.js
-// Drop-in server for the Photo Gallery Twitch Extension (EBS)
-// Paste this whole file into server/server.js and commit.
+// Photo Gallery Twitch Extension — EBS (Express)
 
 require('dotenv').config();
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const cors = require('cors');
 
-const { db, seedPhotos } = require('./db'); // uses better-sqlite3
+// Uses better-sqlite3 via ./db (already in your project)
+const { db, seedPhotos } = require('./db');
 
-// ---------- Config / Env ----------
+// ---------------- Env ----------------
 const PORT = process.env.PORT || 10000;
 
-const EXT_CLIENT_ID = process.env.EXTENSION_CLIENT_ID;
-const EXT_SECRET_B64 = process.env.EXTENSION_SECRET_B64; // base64 encoded
-const EBS_JWT_SECRET = process.env.EBS_JWT_SECRET || 'dev-ebs-secret';
+const EXT_CLIENT_ID     = process.env.EXTENSION_CLIENT_ID;      // Twitch Extension client id
+const EXT_SECRET_B64    = process.env.EXTENSION_SECRET_B64;     // base64-encoded shared secret
+const EBS_JWT_SECRET    = process.env.EBS_JWT_SECRET || 'dev-ebs-secret'; // (not critical here)
 
-const APP_CLIENT_ID = process.env.TWITCH_APP_CLIENT_ID;        // Twitch Application (OAuth)
+const APP_CLIENT_ID     = process.env.TWITCH_APP_CLIENT_ID;     // Twitch OAuth app (Helix)
 const APP_CLIENT_SECRET = process.env.TWITCH_APP_CLIENT_SECRET;
 const OAUTH_REDIRECT_URL =
   process.env.OAUTH_REDIRECT_URL || process.env.REDIRECT_URI ||
   (process.env.SERVER_BASE_URL ? `${process.env.SERVER_BASE_URL}/auth/callback` : '');
 
 if (!EXT_CLIENT_ID || !EXT_SECRET_B64) {
-  console.warn('[WARN] Missing EXTENSION_CLIENT_ID or EXTENSION_SECRET_B64 env vars.');
+  console.warn('[WARN] Missing EXTENSION_CLIENT_ID or EXTENSION_SECRET_B64');
 }
 if (!APP_CLIENT_ID || !APP_CLIENT_SECRET || !OAUTH_REDIRECT_URL) {
-  console.warn('[WARN] Missing TWITCH_APP_CLIENT_ID / TWITCH_APP_CLIENT_SECRET / OAUTH_REDIRECT_URL.');
+  console.warn('[WARN] Missing TWITCH_APP_CLIENT_ID / TWITCH_APP_CLIENT_SECRET / OAUTH_REDIRECT_URL');
 }
 
-// ---------- Express ----------
+// ---------------- App & CORS ----------------
 const app = express();
 app.use(express.json());
 
-// CORS: allow Twitch extension origins by default, or use env CORS_ORIGINS (CSV)
+// Allow Twitch extension origins (override with CORS_ORIGINS=CSV)
 const DEFAULT_ORIGINS = [
   'https://extension-files.twitch.tv',
   'https://*.ext-twitch.tv',
@@ -45,7 +45,7 @@ const allowList = (process.env.CORS_ORIGINS || DEFAULT_ORIGINS.join(','))
 
 app.use(cors({
   origin: (origin, cb) => {
-    if (!origin) return cb(null, true); // allow non-browser (e.g., health checks)
+    if (!origin) return cb(null, true); // allow health checks, curl, etc.
     const ok = allowList.some(pat => {
       if (pat.includes('*')) {
         const re = new RegExp('^' + pat.replace(/\./g,'\\.').replace(/\*/g,'.*') + '$');
@@ -55,27 +55,25 @@ app.use(cors({
     });
     cb(null, ok);
   },
-  credentials: false,
 }));
 
-// ---------- DB bootstrap ----------
+// ---------------- DB bootstrap ----------------
 try { db.exec("ALTER TABLE photos ADD COLUMN likes_count INTEGER DEFAULT 0"); } catch (e) {}
 db.exec(`CREATE TABLE IF NOT EXISTS channel_tokens (
-  channel_id TEXT PRIMARY KEY,
+  channel_id   TEXT PRIMARY KEY,
   access_token TEXT,
   refresh_token TEXT,
-  expires_at INTEGER
+  expires_at   INTEGER
 );`);
 
-// ---------- Helpers ----------
+// ---------------- Helpers ----------------
 const EXT_SECRET = Buffer.from(EXT_SECRET_B64 || '', 'base64');
 
 function verifyExtensionJWT(bearer) {
   if (!bearer) throw new Error('missing_auth');
   const parts = bearer.split(' ');
   const token = parts.length === 2 ? parts[1] : bearer;
-  const payload = jwt.verify(token, EXT_SECRET, { algorithms: ['HS256'] });
-  return payload; // { channel_id, opaque_user_id, user_id?, role, ... }
+  return jwt.verify(token, EXT_SECRET, { algorithms: ['HS256'] });
 }
 
 async function tokenExchange(code) {
@@ -148,7 +146,6 @@ async function ensureValidChannelToken(channel_id) {
   let row = getChannelTokenRow(channel_id);
   if (row && row.access_token && row.expires_at > Math.floor(Date.now()/1000)) return row;
 
-  // refresh if possible
   if (row && row.refresh_token) {
     try {
       const t = await refreshToken(row.refresh_token);
@@ -158,7 +155,6 @@ async function ensureValidChannelToken(channel_id) {
       console.warn('[refreshToken] failed:', e.message);
     }
   }
-  // If no token available, caller must prompt /auth/login
   throw new Error('no_channel_token');
 }
 
@@ -168,15 +164,13 @@ async function getUserById(access_token, user_id) {
 }
 
 async function isSubscriber(channel_id, user_id) {
-  // requires broadcaster token with scope: channel:read:subscriptions
-  const row = await ensureValidChannelToken(channel_id);
+  const row = await ensureValidChannelToken(channel_id); // needs channel:read:subscriptions
   const j = await helixGet('/subscriptions', row.access_token, { broadcaster_id: channel_id, user_id });
   return (j.data && j.data.length > 0);
 }
 
 async function sendChatMessage(channel_id, message) {
-  // requires broadcaster user token with scope: user:write:chat
-  const row = await ensureValidChannelToken(channel_id);
+  const row = await ensureValidChannelToken(channel_id); // needs user:write:chat
   await helixPost('/chat/messages', row.access_token, {
     broadcaster_id: channel_id,
     sender_id: channel_id,
@@ -184,32 +178,36 @@ async function sendChatMessage(channel_id, message) {
   });
 }
 
-// ---------- Middleware ----------
+// ---------------- Middleware ----------------
 function requireAuth(req, res, next) {
   try {
     const auth = req.headers['authorization'];
-    const payload = verifyExtensionJWT(auth);
-    req.channel_id = payload.channel_id;
+    const p = verifyExtensionJWT(auth);
+    req.channel_id = p.channel_id;
     req.twitch = {
-      user_id: payload.user_id || null,
-      opaque_user_id: payload.opaque_user_id || null,
-      role: payload.role || 'viewer'
+      user_id: p.user_id || null,
+      opaque_user_id: p.opaque_user_id || null,
+      role: p.role || 'viewer'
     };
     next();
-  } catch (e) {
+  } catch {
     return res.status(401).json({ error: 'invalid_token' });
   }
 }
-
 function requireJson(req, res, next) {
   if (req.is('application/json')) return next();
   res.status(415).json({ error: 'content_type_json_required' });
 }
+const requireBroadcaster = (req, res, next) => {
+  const role = (req.twitch && req.twitch.role) || 'viewer';
+  if (role !== 'broadcaster' && role !== 'moderator') return res.status(403).json({ error: 'forbidden' });
+  next();
+};
 
-// ---------- Routes ----------
+// ---------------- Routes ----------------
 app.get('/health', (req, res) => res.json({ ok: true }));
 
-// --- OAuth connect for Configure page ---
+// --- OAuth connect (Configure view) ---
 app.get('/auth/login', (req, res) => {
   if (!APP_CLIENT_ID || !OAUTH_REDIRECT_URL) {
     return res.status(500).send('Server missing app OAuth env vars.');
@@ -218,7 +216,7 @@ app.get('/auth/login', (req, res) => {
   url.searchParams.set('client_id', APP_CLIENT_ID);
   url.searchParams.set('redirect_uri', OAUTH_REDIRECT_URL);
   url.searchParams.set('response_type', 'code');
-  // Scopes: read subs for gating, send chat for announcements
+  // Scopes we need: read subs (gating) + send chat (announce tips)
   url.searchParams.set('scope', 'channel:read:subscriptions user:write:chat');
   res.redirect(url.toString());
 });
@@ -228,44 +226,35 @@ app.get('/auth/callback', async (req, res) => {
     const code = req.query.code;
     if (!code) return res.status(400).send('Missing code');
     const t = await tokenExchange(code);
-    // Get broadcaster user to map their channel id
     const u = await helixGet('/users', t.access_token);
-    const broadcaster = (u.data && u.data[0]) || null;
-    if (!broadcaster) throw new Error('user_lookup_failed');
+    const me = (u.data && u.data[0]) || null;
+    if (!me) throw new Error('user_lookup_failed');
 
-    const channel_id = String(broadcaster.id);
+    const channel_id = String(me.id);
     saveChannelToken(channel_id, t.access_token, t.refresh_token, t.expires_in || 3600);
-
-    // seed demo photos for first time
     try { seedPhotos(channel_id); } catch {}
 
-    res.send(`
-      <html><body style="background:#0f0f10;color:#eee;font:14px ui-sans-serif">
-        <p>Connected as <b>@${broadcaster.display_name || broadcaster.login}</b> (channel ${channel_id}).</p>
-        <script>setTimeout(()=>window.close(), 1200)</script>
-      </body></html>
-    `);
+    res.send(`<html><body style="background:#0f0f10;color:#eee;font:14px ui-sans-serif">
+      <p>Connected as <b>@${me.display_name || me.login}</b> (channel ${channel_id}).</p>
+      <script>setTimeout(()=>window.close(), 1200)</script>
+    </body></html>`);
   } catch (e) {
     console.error('/auth/callback error', e);
     res.status(500).send('Auth failed. ' + e.message);
   }
 });
 
-// --- Products (SKUs) so the panel knows what to sell ---
+// --- Products so panel knows SKUs (optional for dev) ---
 app.get('/api/products', (req, res) => {
-  // Tip SKUs add likes + bits; Comment SKU = 500 bits
-  res.json({
-    products: [
-      { sku: 'TIP_100',     displayName: 'Tip 100',     costBits: 100 },
-      { sku: 'TIP_500',     displayName: 'Tip 500',     costBits: 500 },
-      { sku: 'TIP_1000',    displayName: 'Tip 1000',    costBits: 1000 },
-      { sku: 'COMMENT_500', displayName: 'Comment (500)', costBits: 500 }
-    ]
-  });
+  res.json({ products: [
+    { sku: 'TIP_100',     displayName: 'Tip 100',       costBits: 100 },
+    { sku: 'TIP_500',     displayName: 'Tip 500',       costBits: 500 },
+    { sku: 'TIP_1000',    displayName: 'Tip 1000',      costBits: 1000 },
+    { sku: 'COMMENT_500', displayName: 'Comment (500)', costBits: 500 },
+  ]});
 });
 
-// --- Viewer status (sub gate) ---
-// Broadcaster/mod are treated as subscribed during dev so you’re never blocked.
+// --- Status (sub gate; broadcaster/mod bypass while testing) ---
 app.get('/api/status', requireAuth, async (req, res) => {
   const { channel_id, twitch } = req;
   const userId = twitch.user_id || null;
@@ -273,11 +262,11 @@ app.get('/api/status', requireAuth, async (req, res) => {
   let isSub = false;
   try {
     if (role === 'broadcaster' || role === 'moderator') {
-      isSub = true; // dev bypass
+      isSub = true; // dev convenience
     } else if (userId) {
       isSub = await isSubscriber(channel_id, userId);
     }
-  } catch (e) { /* swallow */ }
+  } catch {}
   res.json({ userId, role, isSubscriber: isSub });
 });
 
@@ -287,7 +276,6 @@ app.get('/api/photos', requireAuth, async (req, res) => {
   const role = twitch.role || 'viewer';
   const userId = twitch.user_id || null;
 
-  // Gate regular viewers; broadcaster/mods bypass in dev
   if (role !== 'broadcaster' && role !== 'moderator') {
     if (!userId) return res.status(403).json({ error: 'identity_required' });
     const sub = await isSubscriber(channel_id, userId).catch(() => false);
@@ -301,34 +289,22 @@ app.get('/api/photos', requireAuth, async (req, res) => {
 });
 
 // --- Admin: add/delete photos (Configure) ---
-const requireBroadcaster = (req, res, next) => {
-  const role = (req.twitch && req.twitch.role) || 'viewer';
-  if (role !== 'broadcaster' && role !== 'moderator') {
-    return res.status(403).json({ error: 'forbidden' });
-  }
-  next();
-};
-
 app.post('/api/admin/photos', requireAuth, requireJson, requireBroadcaster, async (req, res) => {
   const { channel_id } = req;
   let { url, title } = req.body || {};
   if (!url || !/^https:\/\/.+/i.test(url)) {
     return res.status(400).json({ error: 'Please provide a direct https image URL.' });
   }
-  // Optional: best-effort HEAD to check content-type is image/*
+  // Best-effort HEAD to check content-type image/*
   try {
     const head = await fetch(url, { method: 'HEAD' });
     const ctype = (head.headers.get('content-type') || '').toLowerCase();
     if (ctype && !ctype.startsWith('image/')) {
       return res.status(400).json({ error: 'URL does not point to an image.' });
     }
-  } catch { /* some CDNs block HEAD; ignore */ }
-
+  } catch {}
   title = title || '';
-  const info = db.prepare(
-    'INSERT INTO photos (channel_id, url, title) VALUES (?, ?, ?)'
-  ).run(channel_id, url, title);
-
+  const info = db.prepare('INSERT INTO photos (channel_id, url, title) VALUES (?, ?, ?)').run(channel_id, url, title);
   res.json({ ok: true, photo: { id: info.lastInsertRowid, url, title, tip_bits_total: 0, likes_count: 0 } });
 });
 
@@ -341,7 +317,7 @@ app.delete('/api/admin/photos/:id', requireAuth, requireBroadcaster, (req, res) 
   res.json({ ok: true });
 });
 
-// --- Comments moderation list (Configure) ---
+// --- Comment moderation list (Configure) ---
 app.get('/api/comments', requireAuth, requireBroadcaster, (req, res) => {
   const { channel_id } = req;
   const limit = Math.max(1, Math.min(200, Number(req.query.limit) || 50));
@@ -359,7 +335,7 @@ app.delete('/api/admin/comments/:id', requireAuth, requireBroadcaster, (req, res
   res.json({ ok: true });
 });
 
-// --- Dev like (or free like for broadcaster/mod). Also announces in chat. ---
+// --- Dev like (free for broadcaster/mod OR DEV_FREEBITS=1). Also announces in chat. ---
 app.post('/api/like', requireAuth, requireJson, async (req, res) => {
   const DEV = process.env.DEV_FREEBITS === '1';
   const { channel_id, twitch } = req;
@@ -382,79 +358,12 @@ app.post('/api/like', requireAuth, requireJson, async (req, res) => {
       if (u && (u.display_name || u.login)) who = u.display_name || u.login;
     }
     await sendChatMessage(channel_id, `⭐ ${who} tipped a photo!`);
-  } catch (e) {
-    console.warn('chat announce failed:', e.message);
-  }
+  } catch (e) { console.warn('chat announce failed:', e.message); }
   res.json({ ok: true });
 });
 
-// --- Bits transaction receipt (TIP_xxx, COMMENT_500) ---
+// --- Bits receipt (TIP_xxx adds like+bits; COMMENT_500 inserts comment) ---
 app.post('/api/transactions/complete', requireAuth, requireJson, async (req, res) => {
   try {
     const { channel_id, twitch } = req;
-    const { onReceipt, photoId, comment } = req.body || {};
-    const sku = (onReceipt && onReceipt.sku) || '';
-
-    if (!sku) return res.status(400).json({ error: 'missing_sku' });
-
-    // Tip SKUs — add bits and a like
-    if (sku.startsWith('TIP_')) {
-      const bits = Number(sku.replace('TIP_', '')) || 0;
-      if (photoId) {
-        db.prepare('UPDATE photos SET tip_bits_total = tip_bits_total + ?, likes_count = likes_count + 1 WHERE id = ? AND channel_id = ?')
-          .run(bits, Number(photoId), channel_id);
-      }
-      try {
-        const row = await ensureValidChannelToken(channel_id);
-        let who = 'Someone';
-        if (row && row.access_token && twitch.user_id) {
-          const u = await getUserById(row.access_token, twitch.user_id).catch(() => null);
-          if (u && (u.display_name || u.login)) who = u.display_name || u.login;
-        }
-        await sendChatMessage(channel_id, `⭐ ${who} tipped a photo!`);
-      } catch (e) { console.warn('chat announce failed:', e.message); }
-      return res.json({ ok: true });
-    }
-
-    // Comment purchase (500 bits)
-    if (sku === 'COMMENT_500') {
-      if (!photoId || !comment) return res.status(400).json({ error: 'missing_photo_or_comment' });
-      const userId = twitch.user_id || null;
-      const display = 'Someone';
-      db.prepare('INSERT INTO comments (channel_id, photo_id, user_id, display_name, message) VALUES (?, ?, ?, ?, ?)')
-        .run(channel_id, Number(photoId), userId, display, String(comment).slice(0, 200));
-      return res.json({ ok: true });
-    }
-
-    return res.status(400).json({ error: 'unknown_sku', sku });
-  } catch (e) {
-    console.error('/transactions/complete error', e);
-    res.status(500).json({ error: 'server_error' });
-  }
-});
-
-// --- DEV path to post a comment without Bits (broadcaster/mod only or DEV_FREEBITS=1) ---
-app.post('/api/comment_with_purchase', requireAuth, requireJson, async (req, res) => {
-  const DEV = process.env.DEV_FREEBITS === '1';
-  const { channel_id, twitch } = req;
-  const role = twitch.role || 'viewer';
-  const { photoId, comment, sku } = req.body || {};
-
-  if (!DEV && role !== 'broadcaster' && role !== 'moderator') {
-    return res.status(403).json({ error: 'bits_required' });
-  }
-  if (!photoId || !comment) return res.status(400).json({ error: 'missing_photo_or_comment' });
-
-  const userId = twitch.user_id || null;
-  db.prepare('INSERT INTO comments (channel_id, photo_id, user_id, display_name, message) VALUES (?, ?, ?, ?, ?)')
-    .run(channel_id, Number(photoId), userId, 'Someone', String(comment).slice(0, 200));
-  res.json({ ok: true });
-});
-
-// --- Config done ping (optional) ---
-app.get('/config-done', (req, res) => res.send('<script>window.close()</script>'));
-
-// ---------- Start ----------
-app.listen(PORT, () => {
-  console.log('EBS listening on :' + PORT);
-});
+    const { onReceipt, photoId, comment }
