@@ -1,18 +1,15 @@
 {
-  "name": "twitch-photo-gallery-extension",
-  "version": "0.1.0",
+  "name": "twitch-photo-ebs",
   "private": true,
+  "version": "1.0.0",
   "scripts": {
-    "dev": "node server/server.js",
-    "start": "node server/server.js"
+    "start": "node server.js"
   },
   "dependencies": {
-    "cookie-session": "^2.0.0",
+    "better-sqlite3": "^9.4.0",
     "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "jsonwebtoken": "^9.0.2",
-    "node-fetch": "^3.3.2",
-    "better-sqlite3": "^9.4.5"
+    "multer": "^1.4.5-lts.1"
   }
 }
