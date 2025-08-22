@@ -1,170 +1,199 @@
+// server.js - Twitch Photo EBS (clean build, single multer import)
+
+const path = require("path");
+const fs = require("fs");
 const express = require("express");
 const cors = require("cors");
-const fs = require("fs");
-const path = require("path");
-const jwt = require("jsonwebtoken");
-const Database = require("better-sqlite3");
-const multer = require("multer");
+const multer = require("multer"); // <-- only once
 
+// ---------- Config ----------
 const PORT = process.env.PORT || 10000;
-const BASE_URL = process.env.BASE_URL || "https://twitch-photo.onrender.com";
-const DEFAULT_DB = process.env.DATABASE_FILE || "/var/data/twitch-photo.db";
+const BASE_URL = process.env.BASE_URL || ""; // e.g. https://twitch-photo.onrender.com
+const DATA_DIR = process.env.DATA_DIR || "/var/data";
+const DB_FILE =
+  process.env.DATABASE_FILE ||
+  path.join(DATA_DIR, "twitch-photo.db");
+const UPLOAD_DIR =
+  process.env.UPLOAD_DIR ||
+  path.join(DATA_DIR, "uploads");
 
-const TWITCH_APP_CLIENT_ID = process.env.TWITCH_APP_CLIENT_ID || "";
-const TWITCH_APP_CLIENT_SECRET = process.env.TWITCH_APP_CLIENT_SECRET || "";
-const EXTENSION_OWNER_USER_ID = process.env.EXTENSION_OWNER_USER_ID || "";
-const EBS_JWT_SECRET = process.env.EBS_JWT_SECRET || "change-me";
+// Ensure folders exist (works with/without persistent disk)
+fs.mkdirSync(DATA_DIR, { recursive: true });
+fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
-let DB_FILE = DEFAULT_DB;
-try { fs.mkdirSync(path.dirname(DEFAULT_DB), { recursive: true }); }
-catch (e) { if (e.code === "EACCES" || e.code === "EPERM") { DB_FILE = "/tmp/twitch-photo.db"; } else { throw e; }}
+// ---------- DB (sqlite3) ----------
+const sqlite3 = require("sqlite3").verbose();
+const db = new sqlite3.Database(DB_FILE);
 
-const UPLOAD_ROOT_DEFAULT = "/var/data/uploads";
-let UPLOAD_ROOT = UPLOAD_ROOT_DEFAULT;
-try { fs.mkdirSync(UPLOAD_ROOT_DEFAULT, { recursive: true }); }
-catch (e) { if (e.code === "EACCES" || e.code === "EPERM") { UPLOAD_ROOT = "/tmp/uploads"; fs.mkdirSync(UPLOAD_ROOT, { recursive: true }); } else { throw e; }}
-
-const db = new Database(DB_FILE);
-db.exec(`
-  CREATE TABLE IF NOT EXISTS photos (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    url TEXT NOT NULL,
-    title TEXT DEFAULT '',
-    likes_count INTEGER DEFAULT 0,
-    tip_bits_total INTEGER DEFAULT 0,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+db.serialize(() => {
+  db.run(
+    `CREATE TABLE IF NOT EXISTS photos (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      url TEXT NOT NULL,
+      local_path TEXT,
+      title TEXT DEFAULT '',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`
   );
-  CREATE TABLE IF NOT EXISTS comments (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    photo_id INTEGER NOT NULL,
-    username TEXT DEFAULT '',
-    message TEXT NOT NULL,
-    bits INTEGER DEFAULT 0,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  db.run(
+    `CREATE TABLE IF NOT EXISTS events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      type TEXT NOT NULL,          -- 'like' | 'comment'
+      photo_id INTEGER NOT NULL,
+      user_name TEXT,
+      amount INTEGER DEFAULT 0,    -- bits mapped to likes
+      comment TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`
   );
-`);
+});
 
+// ---------- App ----------
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
-app.use("/uploads", express.static(UPLOAD_ROOT, { maxAge: "30d", immutable: true }));
+app.use(express.urlencoded({ extended: true }));
 
-function decode(auth){
-  if(!auth) return {};
-  const token = auth.replace(/^Bearer\s+/i,"");
-  try { const d = jwt.decode(token)||{}; return { token, ...d }; } catch { return {}; }
-}
-const ok=(res,data)=>res.json(data||{ok:true});
-const bad=(res,msg,code=400)=>res.status(code).json({error:msg||"bad_request"});
+// Serve uploaded files if you keep them locally
+app.use("/uploads", express.static(UPLOAD_DIR));
 
-app.get("/health",(req,res)=>ok(res,{ok:true,db:DB_FILE,uploads:UPLOAD_ROOT}));
-app.get("/api/status",(req,res)=>{
-  const a=decode(req.headers.authorization);
-  const role=a.role||"viewer";
-  const isSubscriber = (role==="broadcaster"||role==="moderator"); // bypass for owner/mods
-  ok(res,{role,isSubscriber,channel_id:a.channel_id||null,user_id:a.user_id||null});
-});
-
-app.get("/api/photos",(req,res)=>{
-  const rows = db.prepare("SELECT id,url,title,likes_count,tip_bits_total,created_at FROM photos ORDER BY id DESC").all();
-  ok(res, rows);
-});
-app.post("/api/admin/photos",(req,res)=>{
-  const a=decode(req.headers.authorization);
-  const role=a.role||"viewer"; if(!["broadcaster","moderator"].includes(role)) return bad(res,"forbidden",403);
-  const { url, title="" } = req.body||{};
-  if(!url || !/^https:\/\/.+/i.test(url)) return bad(res,"direct https image url required");
-  const r = db.prepare("INSERT INTO photos(url,title) VALUES(?,?)").run(url,title);
-  const row = db.prepare("SELECT id,url,title,likes_count,tip_bits_total,created_at FROM photos WHERE id=?").get(r.lastInsertRowid);
-  ok(res,{photo:row});
-});
-app.delete("/api/admin/photos/:id",(req,res)=>{
-  const a=decode(req.headers.authorization);
-  const role=a.role||"viewer"; if(!["broadcaster","moderator"].includes(role)) return bad(res,"forbidden",403);
-  const id = Number(req.params.id||0); if(!id) return bad(res,"invalid id");
-  const p = db.prepare("SELECT url FROM photos WHERE id=?").get(id);
-  db.prepare("DELETE FROM photos WHERE id=?").run(id);
-  db.prepare("DELETE FROM comments WHERE photo_id=?").run(id);
-  if(p && p.url && p.url.startsWith(BASE_URL+"/uploads/")){
-    const filePath = path.join(UPLOAD_ROOT, path.basename(p.url));
-    fs.promises.unlink(filePath).catch(()=>{});
-  }
-  ok(res,{deleted:id});
-});
-
-const multer = require("multer"); // ensured
+// Multer storage (for file uploads from config UI)
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, UPLOAD_ROOT),
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname||"").toLowerCase() || ".png";
-    const name = "img_"+Date.now()+"_"+Math.random().toString(36).slice(2,8)+ext;
+  destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
+  filename: (_req, file, cb) => {
+    const ext = path.extname(file.originalname || ".png") || ".png";
+    const name = `${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`;
     cb(null, name);
-  }
+  },
 });
 const upload = multer({
   storage,
-  limits: { fileSize: 10 * 1024 * 1024 },
-  fileFilter: (req, file, cb) => {
-    const okTypes = ["image/png","image/jpeg","image/webp","image/gif"];
-    if(okTypes.includes(file.mimetype)) cb(null,true);
-    else cb(new Error("Only png/jpeg/webp/gif images are allowed"));
-  }
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
 });
 
-app.post("/api/admin/upload", upload.single("image"), (req,res)=>{
-  const a=decode(req.headers.authorization);
-  const role=a.role||"viewer"; if(!["broadcaster","moderator"].includes(role)) return bad(res,"forbidden",403);
-  if(!req.file) return bad(res,"no file");
-  const title = (req.body && req.body.title) ? String(req.body.title).slice(0,120) : "";
-  const url = `${BASE_URL}/uploads/${encodeURIComponent(req.file.filename)}`;
-  const r = db.prepare("INSERT INTO photos(url,title) VALUES(?,?)").run(url,title);
-  const row = db.prepare("SELECT id,url,title,likes_count,tip_bits_total,created_at FROM photos WHERE id=?").get(r.lastInsertRowid);
-  ok(res,{photo:row});
-});
-
-function bitsFromSku(sku){ const m=String(sku||'').match(/(\d+)/); return m?parseInt(m[1],10)||0:0; }
-app.post("/api/like",(req,res)=>{
-  const { photoId, bits=0 } = req.body||{}; const id=Number(photoId||0); if(!id) return bad(res,"invalid id");
-  const r=db.prepare("UPDATE photos SET likes_count=likes_count+1, tip_bits_total=tip_bits_total+? WHERE id=?").run(bits,id);
-  if(!r.changes) return bad(res,"not found",404); ok(res,{liked:id,bitsAdded:bits});
-});
-app.post("/api/comment_with_purchase",(req,res)=>{
-  const a=decode(req.headers.authorization);
-  const user=a.user_id||"viewer";
-  const { photoId, comment="" } = req.body||{}; const id=Number(photoId||0);
-  if(!id || !comment.trim()) return bad(res,"photoId and comment required");
-  db.prepare("INSERT INTO comments(photo_id,username,message,bits) VALUES(?,?,?,0)").run(id,user,String(comment).slice(0,500));
-  ok(res,{commented:id});
-});
-app.post("/api/transactions/complete",(req,res)=>{
-  const { onReceipt={}, photoId, comment="" } = req.body||{}; const id=Number(photoId||0);
-  if(!id) return bad(res,"invalid id");
-  const bits=bitsFromSku(onReceipt.sku||"");
-  db.prepare("UPDATE photos SET likes_count=likes_count+1, tip_bits_total=tip_bits_total+? WHERE id=?").run(bits,id);
-  if(comment.trim()) db.prepare("INSERT INTO comments(photo_id,username,message,bits) VALUES(?,?,?,?)").run(id,"viewer",String(comment).slice(0,500),bits||500);
-  ok(res,{applied:true,bits});
-});
-
-app.get("/auth/login",(req,res)=>{
-  const redirectUri = `${BASE_URL}/auth/callback`;
-  const scope = encodeURIComponent("channel:read:subscriptions chat:read chat:edit");
-  const url=`https://id.twitch.tv/oauth2/authorize?client_id=${TWITCH_APP_CLIENT_ID}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=${scope}`;
-  res.redirect(url);
-});
-app.get("/auth/callback", async (req,res)=>{
-  if(!req.query.code) return res.status(400).send("Missing code");
-  const redirectUri = `${BASE_URL}/auth/callback`;
-  const tokenRes = await fetch("https://id.twitch.tv/oauth2/token",{
-    method:"POST", headers:{"Content-Type":"application/x-www-form-urlencoded"},
-    body:new URLSearchParams({
-      client_id: TWITCH_APP_CLIENT_ID, client_secret: TWITCH_APP_CLIENT_SECRET,
-      code: req.query.code, grant_type: "authorization_code", redirect_uri: redirectUri
-    })
+// ---------- Health / Status ----------
+app.get("/health", (_req, res) => {
+  res.json({
+    ok: true,
+    baseUrl: BASE_URL,
+    dbPath: DB_FILE,
+    uploads: UPLOAD_DIR,
+    now: new Date().toISOString(),
   });
-  const tokenJson = await tokenRes.json().catch(()=>({}));
-  res.send(`<html><body style="font-family:ui-sans-serif;padding:16px">
-    <h3>Connected ✔</h3><pre>${String(JSON.stringify(tokenJson,null,2)).replace(/[&<>]/g,s=>({ '&':'&amp;','<':'&lt;','>':'&gt;' }[s]))}</pre>
-    <p>You can close this window.</p></body></html>`);
 });
 
-app.listen(PORT,()=>console.log("EBS listening on",PORT,"DB:",DB_FILE,"Uploads:",UPLOAD_ROOT));
+app.get("/api/status", (_req, res) => {
+  db.get(`SELECT COUNT(*) AS c FROM photos`, (err, row) => {
+    res.json({
+      ok: !err,
+      photos: row ? row.c : 0,
+      baseUrl: BASE_URL,
+    });
+  });
+});
+
+// ---------- Photos API ----------
+
+// List photos newest first
+app.get("/api/photos", (_req, res) => {
+  db.all(
+    `SELECT id, url, title, created_at FROM photos ORDER BY created_at DESC`,
+    (err, rows) => {
+      if (err) return res.status(500).json({ ok: false, error: err.message });
+      res.json({ ok: true, photos: rows });
+    }
+  );
+});
+
+// Add via URL
+app.post("/api/photos/url", (req, res) => {
+  const { url, title = "" } = req.body || {};
+  if (!url) return res.status(400).json({ ok: false, error: "Missing url" });
+  db.run(
+    `INSERT INTO photos (url, title) VALUES (?, ?)`,
+    [url, title],
+    function (err) {
+      if (err) return res.status(500).json({ ok: false, error: err.message });
+      res.json({ ok: true, id: this.lastID });
+    }
+  );
+});
+
+// Upload a file (PNG/JPG/GIF)
+app.post("/api/photos/upload", upload.single("file"), (req, res) => {
+  if (!req.file)
+    return res.status(400).json({ ok: false, error: "No file" });
+
+  const localPath = `/uploads/${req.file.filename}`;
+  const { title = "" } = req.body || {};
+
+  db.run(
+    `INSERT INTO photos (url, local_path, title) VALUES (?, ?, ?)`,
+    [BASE_URL + localPath, localPath, title],
+    function (err) {
+      if (err) return res.status(500).json({ ok: false, error: err.message });
+      res.json({ ok: true, id: this.lastID, url: BASE_URL + localPath });
+    }
+  );
+});
+
+// Delete a photo
+app.delete("/api/photos/:id", (req, res) => {
+  const id = Number(req.params.id);
+  if (!id) return res.status(400).json({ ok: false, error: "Bad id" });
+
+  db.get(`SELECT local_path FROM photos WHERE id = ?`, [id], (err, row) => {
+    if (err) return res.status(500).json({ ok: false, error: err.message });
+
+    db.run(`DELETE FROM photos WHERE id = ?`, [id], (err2) => {
+      if (err2) return res.status(500).json({ ok: false, error: err2.message });
+
+      // Best-effort remove local file
+      if (row && row.local_path) {
+        const abs = path.join(UPLOAD_DIR, path.basename(row.local_path));
+        fs.promises.unlink(abs).catch(() => {});
+      }
+      res.json({ ok: true });
+    });
+  });
+});
+
+// ---------- Likes / Comments (dev-friendly) ----------
+
+// tip/like (maps bits to likes on the server side)
+app.post("/api/tip", (req, res) => {
+  const { photoId, userName = "viewer", bits = 0 } = req.body || {};
+  if (!photoId) return res.status(400).json({ ok: false, error: "photoId required" });
+
+  db.run(
+    `INSERT INTO events (type, photo_id, user_name, amount) VALUES ('like', ?, ?, ?)`,
+    [photoId, userName, bits],
+    function (err) {
+      if (err) return res.status(500).json({ ok: false, error: err.message });
+      res.json({ ok: true, id: this.lastID });
+    }
+  );
+});
+
+// comment (500 bits gate is enforced in the panel UI in Hosted Test)
+app.post("/api/comment", (req, res) => {
+  const { photoId, userName = "viewer", comment = "" } = req.body || {};
+  if (!photoId || !comment)
+    return res.status(400).json({ ok: false, error: "photoId and comment required" });
+
+  db.run(
+    `INSERT INTO events (type, photo_id, user_name, comment) VALUES ('comment', ?, ?, ?)`,
+    [photoId, userName, comment],
+    function (err) {
+      if (err) return res.status(500).json({ ok: false, error: err.message });
+      res.json({ ok: true, id: this.lastID });
+    }
+  );
+});
+
+// ---------- Start ----------
+app.listen(PORT, () => {
+  console.log("EBS listening on", PORT);
+  console.log("DB:", DB_FILE);
+  console.log("Uploads:", UPLOAD_DIR);
+});
